@@ -1,0 +1,187 @@
+---
+title: "LSE_2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+source("P:/db_connect.R")
+# source("X:/db_connect.r")
+library(dplyr)
+library(ggplot2)
+# install.packages("srvyr") # srvyr brings parts of dplyr’s syntax to survey analysis, using the survey package.
+# library(srvyr) 
+library(distrr)
+
+# 
+# devtools::install_github("gibonet/rssci")
+
+# setwd
+setwd(setwd(dirname(rstudioapi::getActiveDocumentContext()$path)))
+getwd()
+
+```
+
+
+distrr: https://cran.r-project.org/web/packages/distrr/distrr.pdf
+
+
+## Data import
+
+### LSE
+
+```{sql connection=statop, output.var="lse", eval = TRUE}
+
+SELECT * FROM LSA.LSE_AB_2002_MV WHERE ERHEBJA = 2018 and gr = 4 and privoef= 1
+
+```
+
+### NOGA
+
+
+```{sql connection=statop, output.var="noga08", eval = TRUE}
+
+SELECT * from OEC.NOGA2008_CODES_MV where stufe = 2
+
+```
+
+### ISCO
+
+```{sql connection=statop, output.var="isco08", eval = TRUE}
+
+SELECT * from OEC.ISCO08_C
+
+```
+
+## Data preparation
+
+### Branchenaggregation
+
+```{r Branchenaggregation}
+
+# Merge LSE mit NOGA2008
+lse2 <- lse %>% 
+  left_join(noga08 %>% 
+              select(NOGA50, NOGA50_DESC_SHORT, CODES_NUM, ABSCHNITTE), 
+            by = c('NOGA08_ENT_2' = 'CODES_NUM'))
+
+lse2$NOGA08_ENT_2 <- factor(lse2$NOGA08_ENT_2)
+
+lse2$ABSCHNITTE <- factor(lse2$ABSCHNITTE, exclude = NULL)
+summary(lse2$ABSCHNITTE)
+
+# BEOBACHTUNGEN AUS ABSCHNITTEN A, B, D, E UND O ENTFERNEN
+lse2 <- lse2 %>% filter(!(ABSCHNITTE %in% c("A", "B", "D", "E","O"))) %>% mutate(ABSCHNITTE = droplevels(ABSCHNITTE))
+
+table(lse2$ABSCHNITTE)
+
+```
+
+### Berufsgruppendefinition
+
+```{r}
+
+# Liste mit Abkürzungen für die Berufsgruppen
+isco2_abk <- readxl::read_excel("L:/STAT/01_Post/Grobe/LSE/ISCO_2_ABK.xlsx")
+
+# Joining die ISCO Codes mit den Abkürzungen
+isco <- isco08 %>%
+  filter(STUFE == 2) %>%
+  left_join(isco2_abk, by = c('ISCO_NUM' = 'isco_2'))
+
+# Joining LSE mit ISCO
+lse3 <- lse %>%
+  left_join(isco %>%
+              select(ISCO, ISCO_NUM, TEXT_ABK), 
+            by = c('ISCO_2' = 'ISCO_NUM'))
+
+```
+
+
+## Data analysis
+
+### Branche
+
+Check results with BFS data in table 'Monatlicher Bruttolohn nach Wirtschaftszweigen (NOGA08) und beruflicher Stellung - Privater Sektor - Zürich' at https://www.bfs.admin.ch/bfs/de/home/statistiken/kataloge-datenbanken/tabellen.assetdetail.12488438.html
+
+```{r branche}
+
+# Medianlohn nach Branche und Geschlecht aufgeschlüsselt
+branche <-lse2 %>% 
+  #Datenwürfel mit distrr
+  dcc6(.variables = c("ERHEBJA", "NOGA08_ENT_2", "NOGA50_DESC_SHORT","GESCHLE"), .funs_list = list(
+    n = ~n(), # Anzahl Beobachtungen resp. Beschäftigte
+    n_entr = ~length(unique(ENTID_N)), # Anzahl Unternehmen
+    p50_median = ~wq(MBLS, GEWIBGRS), # Gewichteter Medienbruttolohn
+    wq25 = ~wq(MBLS, GEWIBGRS, probs = c(0.25)), # Gewichtetes 25% Quantil Medianlohn
+    wq75 = ~wq(MBLS, GEWIBGRS, probs = c(0.75)) # Gewichtetes 75% Quantil Medianlohn
+    ), 
+  .total = "Total") %>%
+  filter(ERHEBJA != "Total" & NOGA08_ENT_2 == "Total") %>%
+  # Datenschutz - wo weniger als 60 Arbeitnehmende / 5 Firmen -> NA!
+  mutate_at(vars(p50_median), funs(ifelse(n < 60 | n_entr < 5,NA,.))) %>%
+  rename(Jahr = ERHEBJA,
+         Branche = NOGA50_DESC_SHORT,
+         Geschlecht = GESCHLE,
+         `Beschäftigte` = n,
+         Betriebe = n_entr,
+         Medianlohn = p50_median,
+         Q25_Medianlohn = wq25,
+         Q75_Medianlohn = wq75) %>%
+  mutate(Geschlecht = recode_factor(Geschlecht,
+                                    `1` = "Männer",
+                                    `2` = "Frauen"))
+
+branche_export <- branche %>%
+  select(Branche, Geschlecht, Medianlohn) %>%
+  filter(!Branche == "Total") %>%
+  mutate(Medianlohn = round(Medianlohn, -2)) %>%
+  tidyr::pivot_wider(., names_from = "Geschlecht", values_from = "Medianlohn")
+
+write.csv(branche_export, "LSE2018_Branche.csv", fileEncoding = "UTF-8", quote = FALSE, row.names = FALSE)
+
+
+```
+
+### Berufsgruppe
+
+```{r berufsgruppe}
+
+# Medianlohn nach Berufsgruppe und Geschlecht aufgeschlüsselt
+berufsgruppe <-lse3 %>% 
+  #Datenwürfel mit distrr
+  dcc6(.variables = c("ERHEBJA", "ISCO_2", "TEXT_ABK","GESCHLE"), .funs_list = list(
+    n = ~n(), # Anzahl Beobachtungen resp. Beschäftigte
+    n_entr = ~length(unique(ENTID_N)), # Anzahl Unternehmen
+    p50_median = ~wq(MBLS, GEWIBGRS), # Gewichteter Medienbruttolohn
+    wq25 = ~wq(MBLS, GEWIBGRS, probs = c(0.25)), # Gewichtetes 25% Quantil Medianlohn
+    wq75 = ~wq(MBLS, GEWIBGRS, probs = c(0.75)) # Gewichtetes 75% Quantil Medianlohn
+    ), 
+  .total = "Total") %>%
+  filter(ERHEBJA != "Total" & ISCO_2 == "Total") %>%
+  # Datenschutz - wo weniger als 60 Arbeitnehmende / 5 Firmen -> NA!
+  mutate_at(vars(p50_median), funs(ifelse(n < 60 | n_entr < 5,NA,.))) %>%
+  rename(Jahr = ERHEBJA,
+         Berufsgruppe = TEXT_ABK,
+         Geschlecht = GESCHLE,
+         `Beschäftigte` = n,
+         Betriebe = n_entr,
+         Medianlohn = p50_median,
+         Q25_Medianlohn = wq25,
+         Q75_Medianlohn = wq75) %>%
+  mutate(Geschlecht = recode_factor(Geschlecht,
+                                    `1` = "Männer",
+                                    `2` = "Frauen"))
+
+berufsgruppe_export <- berufsgruppe %>%
+  select(Berufsgruppe, Geschlecht, Medianlohn) %>%
+  filter(!Berufsgruppe == "Total") %>%
+  mutate(Medianlohn = round(Medianlohn, -2)) %>%
+  tidyr::pivot_wider(., names_from = "Geschlecht", values_from = "Medianlohn")
+
+write.csv(berufsgruppe_export, "LSE2018_Berufsgruppe.csv", fileEncoding = "UTF-8", quote = FALSE, row.names = FALSE)
+
+
+```
+
