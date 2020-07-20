@@ -139,7 +139,7 @@ d3.csv("https://raw.githubusercontent.com/CGRBZH/LSE_Branche_Vis/master/LSE2018_
     .attr("transform", `translate(${margin.left}, 0)`);
   const gColumnTitles = gTop.append("g").attr("transform", `translate(0,10)`);
   const columnTitles = [
-    { text: "Berufsgruppe", textAnchor: "start", x: -margin.left },
+    { text: "Branche", textAnchor: "start", x: -margin.left },
     { text: "Lohnunterschied (%)", textAnchor: "end", x: -12 },
     { text: "Medianlohn (CHF)", textAnchor: "end", x: 0 },
   ];
